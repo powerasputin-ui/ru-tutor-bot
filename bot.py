@@ -77,7 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hi! I'm your Russian tutor bot\n\n"
         "Write me anything - in English or try in Russian - and I'll help you learn. "
-        "Try typing something in Russian, even with mistakes!\n\n"
+        "You can also send voice messages! Try typing or saying something in Russian, even with mistakes.\n\n"
         "Send /reset to clear our conversation history."
     )
 
@@ -98,13 +98,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_text = update.message.text
-    user = update.effective_user
-
-    log_message(user.id, user.username, user.first_name, len(user_text))
-
+async def generate_reply(chat_id, user_text):
     history = chat_histories.get(chat_id, [])
     history.append({"role": "user", "content": user_text})
 
@@ -124,8 +118,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     history.append({"role": "assistant", "content": reply_text})
     chat_histories[chat_id] = history[-20:]
+    return reply_text
 
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_text = update.message.text
+    user = update.effective_user
+
+    log_message(user.id, user.username, user.first_name, len(user_text))
+
+    reply_text = await generate_reply(chat_id, user_text)
     await update.message.reply_text(reply_text)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+    file_bytes = await voice_file.download_as_bytearray()
+
+    try:
+        transcription = client.audio.transcriptions.create(
+            file=("voice.ogg", bytes(file_bytes)),
+            model="whisper-large-v3",
+        )
+        user_text = transcription.text
+    except Exception as e:
+        logger.error(f"Whisper error: {e}")
+        await update.message.reply_text("Sorry, I couldn't understand the voice message. Try again or type it instead.")
+        return
+
+    if not user_text or not user_text.strip():
+        await update.message.reply_text("I couldn't hear anything in that voice message. Try again?")
+        return
+
+    log_message(user.id, user.username, user.first_name, len(user_text))
+
+    reply_text = await generate_reply(chat_id, user_text)
+    await update.message.reply_text(f"I heard: \"{user_text}\"\n\n{reply_text}")
 
 
 def main():
@@ -135,6 +167,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     logger.info("Bot started")
     app.run_polling()
 
