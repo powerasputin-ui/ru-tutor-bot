@@ -81,7 +81,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started")
     app.run_polling()
-
+# redeploy
 
 if __name__ == "__main__":
     main()
