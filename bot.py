@@ -39,17 +39,19 @@ def is_rate_limited(user_id):
     return False
 
 
-async def cleanup_stale_data(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.utcnow()
-    stale_chats = [cid for cid, t in chat_last_active.items() if now - t > INACTIVITY_TTL]
-    for cid in stale_chats:
-        chat_histories.pop(cid, None)
-        chat_last_active.pop(cid, None)
-    stale_users = [uid for uid, times in user_message_times.items() if not times or now - max(times) > INACTIVITY_TTL]
-    for uid in stale_users:
-        user_message_times.pop(uid, None)
-    if stale_chats or stale_users:
-        logger.info(f"Cleanup: removed {len(stale_chats)} stale chats, {len(stale_users)} stale rate-limit entries")
+async def cleanup_stale_data():
+    while True:
+        await asyncio.sleep(3600)
+        now = datetime.utcnow()
+        stale_chats = [cid for cid, t in chat_last_active.items() if now - t > INACTIVITY_TTL]
+        for cid in stale_chats:
+            chat_histories.pop(cid, None)
+            chat_last_active.pop(cid, None)
+        stale_users = [uid for uid, times in user_message_times.items() if not times or now - max(times) > INACTIVITY_TTL]
+        for uid in stale_users:
+            user_message_times.pop(uid, None)
+        if stale_chats or stale_users:
+            logger.info(f"Cleanup: removed {len(stale_chats)} stale chats, {len(stale_users)} stale rate-limit entries")
 
 DB_PATH = os.environ.get("DB_PATH", "stats.db")
 
@@ -217,15 +219,18 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"I heard: \"{user_text}\"\n\n{reply_text}", reply_to_message_id=update.message.message_id)
 
 
+async def start_background_tasks(application):
+    application.create_task(cleanup_stale_data())
+
+
 def main():
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(start_background_tasks).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.job_queue.run_repeating(cleanup_stale_data, interval=timedelta(hours=1), first=timedelta(hours=1))
     logger.info("Bot started")
     app.run_polling()
 
