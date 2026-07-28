@@ -1,7 +1,8 @@
 import os
 import logging
 import sqlite3
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from groq import Groq
@@ -17,6 +18,38 @@ client = Groq(api_key=GROQ_API_KEY)
 MODEL_NAME = "llama-3.3-70b-versatile"
 
 chat_histories = {}
+user_message_times = {}
+chat_last_active = {}
+RATE_LIMIT_MESSAGES = 10
+RATE_LIMIT_WINDOW = timedelta(minutes=1)
+INACTIVITY_TTL = timedelta(hours=6)
+MAX_MESSAGE_LENGTH = 2000
+MAX_VOICE_SECONDS = 120
+
+
+def is_rate_limited(user_id):
+    now = datetime.utcnow()
+    times = user_message_times.get(user_id, [])
+    times = [t for t in times if now - t < RATE_LIMIT_WINDOW]
+    if len(times) >= RATE_LIMIT_MESSAGES:
+        user_message_times[user_id] = times
+        return True
+    times.append(now)
+    user_message_times[user_id] = times
+    return False
+
+
+async def cleanup_stale_data(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.utcnow()
+    stale_chats = [cid for cid, t in chat_last_active.items() if now - t > INACTIVITY_TTL]
+    for cid in stale_chats:
+        chat_histories.pop(cid, None)
+        chat_last_active.pop(cid, None)
+    stale_users = [uid for uid, times in user_message_times.items() if not times or now - max(times) > INACTIVITY_TTL]
+    for uid in stale_users:
+        user_message_times.pop(uid, None)
+    if stale_chats or stale_users:
+        logger.info(f"Cleanup: removed {len(stale_chats)} stale chats, {len(stale_users)} stale rate-limit entries")
 
 DB_PATH = os.environ.get("DB_PATH", "stats.db")
 
@@ -103,11 +136,15 @@ async def generate_reply(chat_id, user_text):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-10:]
 
     try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=500,
+        loop = asyncio.get_running_loop()
+        completion = await loop.run_in_executor(
+            None,
+            lambda: client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=500,
+            ),
         )
         reply_text = completion.choices[0].message.content
     except Exception as e:
@@ -124,24 +161,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user = update.effective_user
 
+    if is_rate_limited(user.id):
+        await update.message.reply_text("You're sending messages too fast! Please wait a moment.")
+        return
+
+    if len(user_text) > MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(f"That message is too long ({len(user_text)} chars). Please keep it under {MAX_MESSAGE_LENGTH} characters.")
+        return
+
+    chat_last_active[chat_id] = datetime.utcnow()
     log_message(user.id, user.username, user.first_name, len(user_text))
 
     reply_text = await generate_reply(chat_id, user_text)
-    await update.message.reply_text(reply_text)
+    await update.message.reply_text(reply_text, reply_to_message_id=update.message.message_id)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
 
+    if is_rate_limited(user.id):
+        await update.message.reply_text("You're sending messages too fast! Please wait a moment.")
+        return
+
+    if update.message.voice.duration > MAX_VOICE_SECONDS:
+        await update.message.reply_text(f"That voice message is too long. Please keep it under {MAX_VOICE_SECONDS} seconds.")
+        return
+
     voice_file = await context.bot.get_file(update.message.voice.file_id)
     file_bytes = await voice_file.download_as_bytearray()
 
     try:
-        transcription = client.audio.transcriptions.create(
-            file=("voice.ogg", bytes(file_bytes)),
-            model="whisper-large-v3",
-            language="ru",
+        loop = asyncio.get_running_loop()
+        transcription = await loop.run_in_executor(
+            None,
+            lambda: client.audio.transcriptions.create(
+                file=("voice.ogg", bytes(file_bytes)),
+                model="whisper-large-v3",
+            ),
         )
         user_text = transcription.text
     except Exception as e:
@@ -153,10 +210,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("I couldn't hear anything in that voice message. Try again?")
         return
 
+    chat_last_active[chat_id] = datetime.utcnow()
     log_message(user.id, user.username, user.first_name, len(user_text))
 
     reply_text = await generate_reply(chat_id, user_text)
-    await update.message.reply_text(f"I heard: \"{user_text}\"\n\n{reply_text}")
+    await update.message.reply_text(f"I heard: \"{user_text}\"\n\n{reply_text}", reply_to_message_id=update.message.message_id)
 
 
 def main():
@@ -167,6 +225,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.job_queue.run_repeating(cleanup_stale_data, interval=timedelta(hours=1), first=timedelta(hours=1))
     logger.info("Bot started")
     app.run_polling()
 
