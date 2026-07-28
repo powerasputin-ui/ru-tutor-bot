@@ -1,5 +1,7 @@
 import os
 import logging
+import sqlite3
+from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from groq import Groq
@@ -9,11 +11,51 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+ADMIN_USER_ID = 35049
 
 client = Groq(api_key=GROQ_API_KEY)
 MODEL_NAME = "llama-3.3-70b-versatile"
 
 chat_histories = {}
+
+DB_PATH = os.environ.get("DB_PATH", "stats.db")
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            message_length INTEGER,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def log_message(user_id, username, first_name, message_length):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO messages (user_id, username, first_name, message_length, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, username, first_name, message_length, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_stats():
+    conn = sqlite3.connect(DB_PATH)
+    total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    total_users = conn.execute("SELECT COUNT(DISTINCT user_id) FROM messages").fetchone()[0]
+    top_users = conn.execute(
+        "SELECT username, first_name, COUNT(*) as cnt FROM messages GROUP BY user_id ORDER BY cnt DESC LIMIT 5"
+    ).fetchall()
+    conn.close()
+    return total_messages, total_users, top_users
 
 SYSTEM_PROMPT = """You are a friendly Russian language tutor for foreigners learning Russian from scratch or at a basic level.
 
@@ -45,9 +87,23 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("History cleared. Let's start fresh!")
 
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+    total_messages, total_users, top_users = get_stats()
+    lines = [f"Total messages: {total_messages}", f"Total users: {total_users}", "", "Top users:"]
+    for username, first_name, cnt in top_users:
+        name = f"@{username}" if username else (first_name or "unknown")
+        lines.append(f"{name}: {cnt} messages")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_text = update.message.text
+    user = update.effective_user
+
+    log_message(user.id, user.username, user.first_name, len(user_text))
 
     history = chat_histories.get(chat_id, [])
     history.append({"role": "user", "content": user_text})
@@ -73,9 +129,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started")
     app.run_polling()
