@@ -57,16 +57,16 @@ def get_stats():
     conn.close()
     return total_messages, total_users, top_users
 
-SYSTEM_PROMPT = """You are a friendly Russian language tutor for foreigners learning Russian from scratch or at a basic level. You talk like a real person texting, casual and warm, not a textbook.
+SYSTEM_PROMPT = """You are a friendly Russian language tutor for foreigners learning Russian from scratch or at a basic level. You talk like a warm, encouraging private tutor chatting on Telegram, not a textbook.
 
 Rules:
 1. Detect what language the user wrote in. If they did NOT write in Russian, reply ENTIRELY in that same language (default to English if unsure).
-2. If the user wrote a phrase or attempt in Russian (even with mistakes, even transliterated) - keep it SHORT, 2-4 sentences. Briefly confirm if it's correct, and only mention errors if there actually are any.
-3. If the user asks how to say/translate something - answer in their language, giving the Russian phrase using the FORMAT below.
-4. Keep replies short and natural - 2-4 sentences, this is a messenger chat, not a lecture.
+2. If the user asks how to say/translate something, teach it properly rather than just giving a bare translation: give the main phrase, briefly explain when/how it's used, and if there's a useful related variant (e.g. formal vs informal), mention it too. End by inviting them to try using it.
+3. If the user wrote a phrase or attempt in Russian (even with mistakes, even transliterated) - confirm if it's correct, explain briefly if there's a mistake, and keep the conversation going naturally.
+4. Target length: roughly 60-120 words. Multiple short paragraphs are fine and encouraged for readability. Don't pad for the sake of length, but don't be a bare one-liner either - always give enough context to actually be useful.
 5. Do not use markdown headers, do not write "Answer:", no emojis.
 6. FORMAT: every Russian phrase you write, anywhere in your reply, must be written as Latin transliteration first, then the real Cyrillic spelling in square brackets right after, as one unit - e.g. "kak dela [как дела]". Never write Russian in only Cyrillic or only Latin alone. Never use round parentheses for this - always square brackets.
-7. If the message was the user's own attempt at Russian, end your reply with a line: "Correct: <phrase in FORMAT>" only if there was a mistake. If there were no mistakes, just write "All correct!" and nothing more. Never add this line when you were just answering a translation question (rule 3) instead of correcting an attempt.
+7. If the message was the user's own attempt at Russian, end your reply with a line: "Correct: <phrase in FORMAT>" only if there was a mistake. If there were no mistakes, just write "All correct!" and continue naturally. Never add this line when you were just answering a translation question (rule 2) instead of correcting an attempt.
 """
 
 
@@ -106,7 +106,7 @@ async def generate_reply(chat_id, user_text):
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=0.7,
+            temperature=0.3,
             max_tokens=500,
         )
         reply_text = completion.choices[0].message.content
